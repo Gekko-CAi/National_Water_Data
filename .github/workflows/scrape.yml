@@ -2,10 +2,14 @@ name: Scrape Water Quality Data
 
 on:
   schedule:
-    # 每2小时运行一次 (UTC时间)
-    # UTC每2小时 = 北京时间每2小时 (因为8是2的倍数)
-    - cron: '0 */2 * * *'
+    # 每2小时运行一次 (UTC时间)，避开整点高峰(GitHub建议)
+    # 北京时间: 8:15, 10:15, 12:15, 14:15, 16:15, 18:15, 20:15, 22:15, 0:15, 2:15, 4:15, 6:15
+    - cron: '15 */2 * * *'
   workflow_dispatch: # 允许手动触发
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/scrape.yml'
 
 jobs:
   scrape:
