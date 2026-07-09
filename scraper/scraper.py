@@ -90,7 +90,7 @@ def fetch_all_data():
     """
     all_data = []
     page_index = 1
-    page_size = 2000  # 全国数据使用大页码一次获取
+    page_size = 200  # API有每页最大返回限制，PageSize过大会导致数据截断
     total_pages = 1
 
     while page_index <= total_pages:
@@ -134,6 +134,11 @@ def fetch_all_data():
 
         print(f"第 {page_index}/{total_pages} 页: 获取 {len(tbody)} 条数据")
         page_index += 1
+
+        # 页间短暂延迟，避免请求过快被限制
+        if page_index <= total_pages:
+            import time
+            time.sleep(1)
 
     return all_data
 
