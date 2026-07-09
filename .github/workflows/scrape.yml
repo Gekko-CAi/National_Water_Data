@@ -14,6 +14,7 @@ on:
 jobs:
   scrape:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write # 需要写权限来推送数据文件
     steps:

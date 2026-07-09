@@ -86,12 +86,16 @@ def fetch_all_data():
     从API获取所有断面的实时监测数据。
 
     支持分页: 当数据量超过单页上限时自动获取后续页面。
+    每页失败时自动重试最多3次。
     返回: list of list, 每个内部列表代表一条记录 (已清洗)
     """
+    import time
+
     all_data = []
     page_index = 1
     page_size = 200  # API有每页最大返回限制，PageSize过大会导致数据截断
     total_pages = 1
+    max_retries = 3
 
     while page_index <= total_pages:
         params = {
@@ -103,23 +107,36 @@ def fetch_all_data():
             "PageSize": str(page_size),
         }
 
-        try:
-            response = requests.post(
-                API_URL,
-                data=params,
-                headers=REQUEST_HEADERS,
-                verify=False,  # 该网站使用自签名证书
-                timeout=120,
-            )
-            response.raise_for_status()
-            result = response.json()
-        except Exception as e:
-            print(f"[ERROR] 第 {page_index} 页数据获取失败: {e}")
-            break
+        result = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                response = requests.post(
+                    API_URL,
+                    data=params,
+                    headers=REQUEST_HEADERS,
+                    verify=False,  # 该网站使用自签名证书
+                    timeout=180,
+                )
+                response.raise_for_status()
+                result = response.json()
+                break
+            except Exception as e:
+                print(f"[WARN] 第 {page_index} 页第 {attempt}/{max_retries} 次尝试失败: {e}")
+                if attempt < max_retries:
+                    wait = attempt * 5  # 5s, 10s
+                    print(f"  等待 {wait}s 后重试...")
+                    time.sleep(wait)
+                else:
+                    print(f"[ERROR] 第 {page_index} 页重试{max_retries}次后仍失败，跳过")
+
+        if result is None:
+            page_index += 1
+            continue
 
         if result.get("result") == 0 or "tbody" not in result:
             print(f"[WARN] 第 {page_index} 页无数据返回")
-            break
+            page_index += 1
+            continue
 
         # 第一页时获取总页数
         if page_index == 1:
@@ -135,10 +152,9 @@ def fetch_all_data():
         print(f"第 {page_index}/{total_pages} 页: 获取 {len(tbody)} 条数据")
         page_index += 1
 
-        # 页间短暂延迟，避免请求过快被限制
+        # 页间延迟，避免请求过快被限制
         if page_index <= total_pages:
-            import time
-            time.sleep(1)
+            time.sleep(2)
 
     return all_data
 
