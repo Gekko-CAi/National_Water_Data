@@ -54,6 +54,7 @@ COLUMNS = [
     "总氮(mg/L)",
     "叶绿素α(mg/L)",
     "藻密度(cells/L)",
+    "抓取时间",
 ]
 
 
@@ -205,6 +206,7 @@ def main():
 
     # ===== 第一步: 抓取新数据 =====
     print(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] 开始抓取数据...")
+    scrape_time = now.strftime("%Y-%m-%d %H:%M:%S")
     new_data = fetch_all_data()
     print(f"共抓取到 {len(new_data)} 条数据")
 
@@ -212,10 +214,11 @@ def main():
         print("[ERROR] 未获取到任何数据，程序退出")
         return
 
-    # 为监测时间添加年份
+    # 为监测时间添加年份，并追加抓取时间
     for row in new_data:
         if len(row) > 3:
             row[3] = add_year_to_monitor_time(row[3], now)
+        row.append(scrape_time)
 
     # ===== 第二步: 读取已有数据 =====
     existing_data = []
@@ -227,6 +230,9 @@ def main():
             reader = csv.reader(f)
             header = next(reader, None)  # 跳过表头
             for row in reader:
+                # 兼容旧数据: 补齐缺失的"抓取时间"列
+                while len(row) < len(COLUMNS):
+                    row.append("")
                 existing_data.append(row)
                 # 去重键: (断面名称, 监测时间)
                 key = (row[2], row[3]) if len(row) > 3 else None
