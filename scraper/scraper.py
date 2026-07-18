@@ -192,6 +192,75 @@ def add_year_to_monitor_time(time_str, now):
         return time_str
 
 
+def get_last_scrape_time(data_dir, today_str):
+    """
+    从数据目录中读取最近一次成功抓取的时间（北京时间）。
+
+    遍历今天和昨天的 CSV 文件（兼容跨天场景），
+    返回所有记录中"抓取时间"列的最大值。
+
+    Returns:
+        datetime 或 None（如果找不到任何抓取时间记录）
+    """
+    candidates = [
+        os.path.join(data_dir, f"National_Water_{today_str}.csv"),
+    ]
+    # 也看昨天文件（避免跨天判断问题）
+    yesterday = (datetime.now(BEIJING_TZ) - timedelta(days=1)).strftime("%Y%m%d")
+    candidates.append(os.path.join(data_dir, f"National_Water_{yesterday}.csv"))
+
+    latest = None
+    for filepath in candidates:
+        if not os.path.exists(filepath):
+            continue
+        try:
+            with open(filepath, "r", encoding="utf-8-sig") as f:
+                reader = csv.reader(f)
+                header = next(reader, None)  # 跳过表头
+                for row in reader:
+                    # 抓取时间在最后一列；兼容旧数据（最后一列为空）
+                    if len(row) >= len(COLUMNS) and row[-1].strip():
+                        try:
+                            t = datetime.strptime(
+                                row[-1].strip(), "%Y-%m-%d %H:%M:%S"
+                            )
+                            t = t.replace(tzinfo=BEIJING_TZ)
+                            if latest is None or t > latest:
+                                latest = t
+                        except ValueError:
+                            continue
+        except Exception as e:
+            print(f"[WARN] 读取 {filepath} 时出错: {e}")
+            continue
+
+    return latest
+
+
+def should_scrape(now, data_dir, today_str, min_interval_hours=2.0):
+    """
+    判断是否应该执行抓取。
+
+    规则:
+      - 没有任何数据 → 立即抓取
+      - 距上次抓取 ≥ min_interval_hours → 抓取
+      - 距上次抓取 < min_interval_hours → 跳过（让 GitHub Actions 提前结束）
+
+    Returns:
+        (should_run: bool, last_scrape: datetime or None, elapsed_hours: float or None)
+    """
+    last_scrape = get_last_scrape_time(data_dir, today_str)
+    if last_scrape is None:
+        print("未找到上次抓取记录，将执行首次抓取")
+        return True, None, None
+
+    elapsed = (now - last_scrape).total_seconds() / 3600.0
+    print(
+        f"上次抓取时间: {last_scrape.strftime('%Y-%m-%d %H:%M:%S')}, "
+        f"距今 {elapsed:.2f} 小时 (阈值: {min_interval_hours} 小时)"
+    )
+    return elapsed >= min_interval_hours, last_scrape, elapsed
+
+
 def main():
     """主函数: 抓取数据 -> 去重合并 -> 保存CSV"""
     # 获取当前北京时间
@@ -203,6 +272,18 @@ def main():
 
     # 创建数据目录
     os.makedirs(data_dir, exist_ok=True)
+
+    # ===== 第零步: 间隔检查 (避免 GitHub Actions 延迟合并导致的"重复抓取") =====
+    should_run, last_scrape, elapsed = should_scrape(
+        now, data_dir, today_str, min_interval_hours=2.0
+    )
+    if not should_run:
+        print(
+            f"距上次抓取不足 2 小时 (实际 {elapsed:.2f}h)，跳过本次抓取。"
+            f"下次预计: {(last_scrape + timedelta(hours=2)).strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+        # 优雅退出，GitHub Actions 会显示 success
+        return
 
     # ===== 第一步: 抓取新数据 =====
     print(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] 开始抓取数据...")
