@@ -2,11 +2,9 @@ name: Scrape Water Quality Data
 
 on:
   schedule:
-    # 每小时触发一次 (UTC时间)
-    # 脚本内部判断"距上次成功抓取是否≥2小时"再决定是否真抓
-    # 这样能避免 GitHub Actions 高峰期延迟导致的"两轮合并为一轮"问题
-    # 北京时间: 每小时第 15 分 (避开整点高峰)
-    - cron: '15 * * * *'
+    # 每小时运行一次 (UTC时间)
+    # 北京时间: 每小时第 25 分
+    - cron: '25 * * * *'
   workflow_dispatch: # 允许手动触发
   push:
     branches: [ main ]
