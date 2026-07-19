@@ -8,6 +8,7 @@ URL: https://szzdjc.cnemc.cn:8070/GJZ/Business/Publish/Main.html
   - 从国家地表水水质实时数据发布系统抓取所有断面的实时监测数据
   - 支持分页获取全部数据
   - 按天保存为CSV文件 (National_Water_YYYYMMDD.csv)
+  - 按月存放于子文件夹 (Data/National_Water_YYYYMM/)
   - 同一断面同一监测时间的数据自动去重
   - 每次抓取的数据追加到当天已有文件中 (不覆盖)
   - 时间按北京时间 (UTC+8) 计算
@@ -197,11 +198,15 @@ def main():
     # 获取当前北京时间
     now = datetime.now(BEIJING_TZ)
     today_str = now.strftime("%Y%m%d")
+    month_str = now.strftime("%Y%m")
     filename = f"National_Water_{today_str}.csv"
-    data_dir = "Data"
+
+    # 按月存放: Data/National_Water_YYYYMM/National_Water_YYYYMMDD.csv
+    month_folder = f"National_Water_{month_str}"
+    data_dir = os.path.join("Data", month_folder)
     filepath = os.path.join(data_dir, filename)
 
-    # 创建数据目录
+    # 创建数据目录 (含月份子文件夹)
     os.makedirs(data_dir, exist_ok=True)
 
     # ===== 第一步: 抓取新数据 =====
