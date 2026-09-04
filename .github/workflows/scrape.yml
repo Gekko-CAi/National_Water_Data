@@ -1,32 +1,29 @@
 name: Scrape Water Quality Data
 
 # 触发方式:
-#   workflow_dispatch - GitHub Actions 页面手动执行
-#   schedule          - 内置定时, 每 2 小时一次
+#   workflow_dispatch   - GitHub Actions 页面手动执行
+#   repository_dispatch - 外部定时服务 (cron-job.org) 调用, event_type: cron_trigger
 #
-# 关于数据源拦截 (2026-09-04):
-#   站点 szzdjc.cnemc.cn:8070 曾于 09-04 白天对 GitHub runner 的海外 IP 完全封禁
+# 观察模式说明 (2026-09-04):
+#   数据源网站 szzdjc.cnemc.cn:8070 白天对 GitHub runner 的海外 IP 完全封禁
 #   (首请求即返回 -1)。当晚 22:48 实测降级为「窗口配额限流」: 前 3 页可正常获取,
-#   第 4 页起返回 -1。因此 Actions 已恢复抓取能力, 只是每轮未必能抓全 9 页。
-#   脚本会保留已抓到的数据并正常提交, 缺失的时次由后续周期补齐。
+#   第 4 页起返回 -1。因此 Actions 已恢复抓取能力, 只是每轮未必能抓全 9 页,
+#   脚本会保留已抓数据并正常提交, 缺失时次由后续周期补齐。保留 cron-job.org
+#   外部触发以持续观察该站点是否解除对 GitHub IP 的限制。
 #
-#   国内出口的抓取链路仍在并行运行:
+#   国内出口的抓取链路 (与此互不影响):
 #     - Gitee Go 流水线 (gekko-cai/National_Water_Data, cron 每 2 小时)
 #     - 本机计划任务 local_scrape/scrape_local.py (每 2 小时)
 on:
   workflow_dispatch:
 
-  # 内置定时: 每 2 小时的第 0 分
-  # GitHub Actions 的 cron 【固定使用 UTC】, 且为 5 位标准格式 (分 时 日 月 周)
-  #   UTC 0,2,4,... 点 = 北京时间 8,10,12,... 点
-  # 注意: GitHub 在整点高峰期会延迟 schedule 触发(可能延后数分钟至数十分钟), 属正常现象
-  schedule:
-    - cron: '0 */2 * * *'
+  # cron-job.org 定时触发 (每 2 小时 POST repository_dispatch, event_type: cron_trigger)
+  repository_dispatch:
+    types: [cron_trigger]
 
-  # 外部定时触发 (cron-job.org) — 已停用, 改用上面的内置 schedule
-  # 如需重新启用, 取消下面两行注释即可 (event_type: cron_trigger)
-  # repository_dispatch:
-  #   types: [cron_trigger]
+  # 若想改用 GitHub 内置 schedule (不依赖外部服务), 取消下面注释:
+  # schedule:
+  #   - cron: '0 */2 * * *'   # UTC 每偶数小时整点 = 北京时 8/10/12... 点
 
 # 防止重复抓取, 对数据源站点更友好
 concurrency:
