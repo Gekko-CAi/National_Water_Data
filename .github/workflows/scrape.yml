@@ -1,13 +1,22 @@
 name: Scrape Water Quality Data
 
-# 手动触发用 (workflow_dispatch)。
-# 说明: 数据源网站 szzdjc.cnemc.cn:8070 自 2026-09-04 起对 GitHub runner 的
-# 海外 IP 返回 -1 拦截响应, 本 workflow 已无法抓到数据。
-# 定时抓取已迁移到国内出口: 本机计划任务运行 local_scrape/scrape_local.py,
-# 经 Git Data API 直接推送数据到本仓库。如需恢复 Actions 抓取,
-# 重新加回 schedule 触发即可 (scraper.py v2 会对拦截响应给出清晰诊断)。
+# 触发方式:
+#   workflow_dispatch   - GitHub Actions 页面手动执行
+#   repository_dispatch - 外部定时服务 (cron-job.org) 调用, event_type: cron_trigger
+#
+# 观察模式说明 (2026-09-04):
+#   数据源网站 szzdjc.cnemc.cn:8070 自 2026-09-04 起对 GitHub runner 的海外 IP
+#   返回 -1 拦截响应 (HTTP 200 + 裸整数 JSON), 本 workflow 目前抓不到数据。
+#   现保留外部定时触发, 用于持续观察该站点后期是否解除对 GitHub IP 的封禁。
+#   失败属预期结果, 日志会明确打印 "-1 = 出口 IP 被拦截" 及响应样本。
+#
+#   正式的定时抓取已迁移到国内出口:
+#     - Gitee Go 流水线 (gekko-cai/National_Water_Data, cron 每 2 小时)
+#     - 本机计划任务 local_scrape/scrape_local.py (每 2 小时)
 on:
   workflow_dispatch:
+  repository_dispatch:
+    types: [cron_trigger]
 
 # 防止重复抓取, 对数据源站点更友好
 concurrency:
@@ -17,7 +26,9 @@ concurrency:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 被拦截时每页会等待 60s 重试 (最多 2 次/页), 9 页最坏约 18 分钟,
+    # 加上依赖安装, 25 分钟留足余量
+    timeout-minutes: 25
     permissions:
       contents: write # 需要写权限来推送数据文件
     steps:
