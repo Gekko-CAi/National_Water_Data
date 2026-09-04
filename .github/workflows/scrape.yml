@@ -1,20 +1,15 @@
 name: Scrape Water Quality Data
 
+# 手动触发用 (workflow_dispatch)。
+# 说明: 数据源网站 szzdjc.cnemc.cn:8070 自 2026-09-04 起对 GitHub runner 的
+# 海外 IP 返回 -1 拦截响应, 本 workflow 已无法抓到数据。
+# 定时抓取已迁移到国内出口: 本机计划任务运行 local_scrape/scrape_local.py,
+# 经 Git Data API 直接推送数据到本仓库。如需恢复 Actions 抓取,
+# 重新加回 schedule 触发即可 (scraper.py v2 会对拦截响应给出清晰诊断)。
 on:
-  schedule:
-    # 每2小时运行一次 (UTC时间)，每小时的第25分钟
-    # 北京时间: 00:25, 02:25, 04:25, 06:25, 08:25, 10:25, 14:25, 16:25, 18:25, 20:25, 22:25
-    - cron: '25 */2 * * *'
-  workflow_dispatch: # 允许手动触发
-  repository_dispatch: # 允许外部触发 (cron-job.org)
-    types: [scrape]
-  push:
-    branches: [ main ]
-    paths:
-      - '.github/workflows/scrape.yml'
+  workflow_dispatch:
 
-# 防止 schedule 与 repository_dispatch 同时触发造成重复抓取,
-# 也防止上次未结束时下次又启动 (对数据源站点更友好)
+# 防止重复抓取, 对数据源站点更友好
 concurrency:
   group: scrape
   cancel-in-progress: true
