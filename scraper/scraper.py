@@ -22,6 +22,17 @@ v2 加固说明 (2026-09-04):
   - 完全抓不到数据时显式 sys.exit(1) (旧版部分失败路径会静默 exit 0, 掩盖故障)
   - 所有输出实时 flush, 避免 job 被超时终止时丢失日志
   - 单请求超时由 180s 降为 60s, 减少被拦截时的无效等待
+
+v3 本机版说明 (2026-09-04, 针对 -1 响应):
+  - 实测结论: 站点返回的 -1 是【出口 IP 信誉封禁】, 而非单纯的"抓太快":
+      * 直连出口(绕过代理)时, 空闲 8 分钟后的第一个请求依然返回 -1 (耗时仅 0.8s)
+      * 同一时刻走本机代理的另一出口, 请求正常返回完整数据
+      * GitHub Actions 的 Azure IP 则被持续封禁 (12 小时以上, 每次都是首请求即 -1)
+  - 因此: 必须走能用的出口 (本机默认代理), 切勿用 trust_env=False 绕过代理直连
+  - 叠加的窗口配额限流: 即使是可用的出口 IP, 短时间内连续请求数页后也会 -1,
+    隔几分钟可恢复 (实测间隔 9 分钟后 9 页基本全通)
+  - 对策: 页间隔 2s -> PAGE_DELAY 秒; 遇 -1 等待 BLOCK_WAIT 秒后重试本页;
+    连续 BLOCK_MAX 次被拒则提前收工, 保留已抓到的数据, 下个周期补
 """
 
 import sys
@@ -38,6 +49,11 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # 北京时间 (UTC+8)
 BEIJING_TZ = timezone(timedelta(hours=8))
+
+# 抓取节奏 (针对站点窗口配额限流的对策)
+PAGE_DELAY = 12     # 页间等待秒数 (原 2s, 放慢以避开配额窗口)
+BLOCK_WAIT = 60     # 遭遇 -1 封禁响应后的等待秒数 (等配额窗口滑过)
+BLOCK_MAX = 3       # 连续被拒次数上限, 超过则提前收工, 保留已抓数据
 
 # API配置
 API_URL = "https://szzdjc.cnemc.cn:8070/GJZ/Ajax/Publish.ashx"
@@ -108,7 +124,10 @@ def fetch_page(page_index, page_size, max_retries=3):
     """
     获取单页数据, 带重试。
 
-    返回: dict (API 正常响应) 或 None (重试耗尽仍失败)
+    返回:
+      dict      -> API 正常响应
+      "BLOCKED" -> 站点返回 -1 (出口 IP 被拒), 无需按网络错误重试
+      None      -> 网络层错误, 重试耗尽
     失败时打印 HTTP 状态与响应样本, 便于判断是否被 WAF/IP 拦截。
     """
     params = {
@@ -137,9 +156,9 @@ def fetch_page(page_index, page_size, max_retries=3):
                 log(f"[ERROR] 第 {page_index} 页返回非预期的 JSON 类型 "
                     f"{type(result).__name__} (HTTP {response.status_code}): "
                     f"{str(result)[:300]}")
-                log("[HINT] 数据源网站很可能对当前出口 IP (海外/数据中心) 启用了拦截。"
-                    "GitHub Actions runner 均为海外 Azure IP, 建议改用国内机器抓取或自建 runner")
-                result = None
+                log("[HINT] 该响应 (-1) 为站点对出口 IP 的访问拒绝/窗口配额限流, "
+                    "不是网络故障, 立即重试无效, 需等待配额窗口滑过")
+                return "BLOCKED"
             return result
         except Exception as e:
             log(f"[WARN] 第 {page_index} 页第 {attempt}/{max_retries} 次尝试失败: {e}")
@@ -166,14 +185,40 @@ def fetch_all_data():
     page_size = 200  # API有每页最大返回限制，PageSize过大会导致数据截断
     total_pages = 1
     failed_pages = 0
+    blocked_pages = 0
+    consec_blocked = 0
+    page_block_tries = 0
 
     while page_index <= total_pages:
         result = fetch_page(page_index, page_size)
 
+        if result == "BLOCKED":
+            blocked_pages += 1
+            consec_blocked += 1
+            page_block_tries += 1
+            if consec_blocked >= BLOCK_MAX:
+                log(f"[WARN] 连续 {consec_blocked} 次被站点拒绝 (-1), 提前收工, "
+                    f"保留已抓到的 {len(all_data)} 条数据, 下个周期补齐")
+                break
+            if page_block_tries <= 2:
+                log(f"  等待 {BLOCK_WAIT}s 后重试第 {page_index} 页 "
+                    f"(第 {page_block_tries} 次)...")
+                time.sleep(BLOCK_WAIT)
+                continue
+            # 本页两次仍被拒, 跳过该页
+            log(f"[WARN] 第 {page_index} 页两次被拒, 跳过")
+            page_index += 1
+            page_block_tries = 0
+            continue
+
         if result is None:
             failed_pages += 1
+            consec_blocked = 0
             page_index += 1
             continue
+
+        consec_blocked = 0
+        page_block_tries = 0
 
         if result.get("result") == 0 or "tbody" not in result:
             log(f"[WARN] 第 {page_index} 页无数据返回")
@@ -198,12 +243,14 @@ def fetch_all_data():
         log(f"第 {page_index}/{total_pages} 页: 获取 {len(tbody)} 条数据")
         page_index += 1
 
-        # 页间延迟，避免请求过快被限制
+        # 页间延迟，避免请求过快触发站点窗口配额限流
         if page_index <= total_pages:
-            time.sleep(2)
+            time.sleep(PAGE_DELAY)
 
     if failed_pages:
-        log(f"[WARN] 共 {failed_pages} 页抓取失败")
+        log(f"[WARN] 共 {failed_pages} 页网络层抓取失败")
+    if blocked_pages:
+        log(f"[WARN] 共 {blocked_pages} 页被站点拒绝 (-1)")
     return all_data
 
 
