@@ -51,15 +51,20 @@ jobs:
           TZ: Asia/Shanghai # 设置时区为北京时间
           PYTHONUNBUFFERED: '1' # 实时输出日志, job 被终止时不丢失
 
+      # 注意: 本机计划任务 (local_scrape/scrape_local.py) 也在向本仓库推送数据,
+      # 两边可能同时写。必须先 pull --rebase 再提交, 否则 push 会被远端拒绝。
+      # pull 必须放在写入数据之前(此时工作区干净), 否则 rebase 会因有未提交改动而失败。
       - name: Commit and push data
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          git pull --rebase origin "${GITHUB_REF_NAME}" || echo "[WARN] 同步远端失败, 继续尝试提交"
           git add Data/
           if git diff --staged --quiet; then
             echo "No new data to commit"
           else
             COMMIT_MSG="Auto-scrape: $(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M') Beijing time"
             git commit -m "$COMMIT_MSG"
-            git push
+            # 首次推送若被拒(远端又有新提交), 再同步一次后重试
+            git push || { git pull --rebase origin "${GITHUB_REF_NAME}" && git push; }
           fi
