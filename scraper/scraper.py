@@ -12,8 +12,20 @@ URL: https://szzdjc.cnemc.cn:8070/GJZ/Business/Publish/Main.html
   - 同一断面同一监测时间的数据自动去重
   - 每次抓取的数据追加到当天已有文件中 (不覆盖)
   - 时间按北京时间 (UTC+8) 计算
+
+v2 加固说明 (2026-09-04):
+  - 修复: API 对部分出口 IP (如 GitHub Actions 海外 runner) 返回非 dict 的 JSON
+    (如裸整数错误码) 时, 旧版在 result.get(...) 处抛 AttributeError 直接崩溃 (exit 1)
+  - 新版对响应结构做严格校验, 异常时打印 HTTP 状态码与响应样本, 便于诊断是否被 WAF 拦截
+  - total 字段强制转 int, 防止字符串类型导致 TypeError
+  - clean_value 对非字符串单元格做类型兜底
+  - 完全抓不到数据时显式 sys.exit(1) (旧版部分失败路径会静默 exit 0, 掩盖故障)
+  - 所有输出实时 flush, 避免 job 被超时终止时丢失日志
+  - 单请求超时由 180s 降为 60s, 减少被拦截时的无效等待
 """
 
+import sys
+import time
 import requests
 import csv
 import os
@@ -59,6 +71,11 @@ COLUMNS = [
 ]
 
 
+def log(msg):
+    """带 flush 的日志输出, 确保在 CI 环境被终止时日志不丢失"""
+    print(msg, flush=True)
+
+
 def clean_value(text):
     """
     从API返回的HTML片段中提取纯数据值。
@@ -68,6 +85,10 @@ def clean_value(text):
       - "<span title='原始值：27.78'>27.8</span>" 优先提取原始值
       - 纯文本数字 如 "2"
     """
+    if text is None:
+        return ""
+    if not isinstance(text, str):
+        text = str(text)
     if not text or text == "--":
         return ""
     # 尝试从 title 属性中提取原始值
@@ -83,6 +104,55 @@ def clean_value(text):
     return text.strip()
 
 
+def fetch_page(page_index, page_size, max_retries=3):
+    """
+    获取单页数据, 带重试。
+
+    返回: dict (API 正常响应) 或 None (重试耗尽仍失败)
+    失败时打印 HTTP 状态与响应样本, 便于判断是否被 WAF/IP 拦截。
+    """
+    params = {
+        "action": "getRealDatas",
+        "AreaID": "",
+        "RiverID": "",
+        "MNName": "",
+        "PageIndex": str(page_index),
+        "PageSize": str(page_size),
+    }
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = requests.post(
+                API_URL,
+                data=params,
+                headers=REQUEST_HEADERS,
+                verify=False,  # 该网站使用自签名证书
+                timeout=60,
+            )
+            response.raise_for_status()
+            result = response.json()
+            # 关键加固: API 可能返回非 dict 的 JSON (如 -1 等错误码),
+            # 这通常意味着该出口 IP 被数据源网站的 WAF 拦截
+            if not isinstance(result, dict):
+                log(f"[ERROR] 第 {page_index} 页返回非预期的 JSON 类型 "
+                    f"{type(result).__name__} (HTTP {response.status_code}): "
+                    f"{str(result)[:300]}")
+                log("[HINT] 数据源网站很可能对当前出口 IP (海外/数据中心) 启用了拦截。"
+                    "GitHub Actions runner 均为海外 Azure IP, 建议改用国内机器抓取或自建 runner")
+                result = None
+            return result
+        except Exception as e:
+            log(f"[WARN] 第 {page_index} 页第 {attempt}/{max_retries} 次尝试失败: {e}")
+            if attempt < max_retries:
+                wait = attempt * 5  # 5s, 10s
+                log(f"  等待 {wait}s 后重试...")
+                time.sleep(wait)
+            else:
+                log(f"[ERROR] 第 {page_index} 页重试{max_retries}次后仍失败")
+
+    return None
+
+
 def fetch_all_data():
     """
     从API获取所有断面的实时监测数据。
@@ -91,73 +161,49 @@ def fetch_all_data():
     每页失败时自动重试最多3次。
     返回: list of list, 每个内部列表代表一条记录 (已清洗)
     """
-    import time
-
     all_data = []
     page_index = 1
     page_size = 200  # API有每页最大返回限制，PageSize过大会导致数据截断
     total_pages = 1
-    max_retries = 3
+    failed_pages = 0
 
     while page_index <= total_pages:
-        params = {
-            "action": "getRealDatas",
-            "AreaID": "",
-            "RiverID": "",
-            "MNName": "",
-            "PageIndex": str(page_index),
-            "PageSize": str(page_size),
-        }
-
-        result = None
-        for attempt in range(1, max_retries + 1):
-            try:
-                response = requests.post(
-                    API_URL,
-                    data=params,
-                    headers=REQUEST_HEADERS,
-                    verify=False,  # 该网站使用自签名证书
-                    timeout=180,
-                )
-                response.raise_for_status()
-                result = response.json()
-                break
-            except Exception as e:
-                print(f"[WARN] 第 {page_index} 页第 {attempt}/{max_retries} 次尝试失败: {e}")
-                if attempt < max_retries:
-                    wait = attempt * 5  # 5s, 10s
-                    print(f"  等待 {wait}s 后重试...")
-                    time.sleep(wait)
-                else:
-                    print(f"[ERROR] 第 {page_index} 页重试{max_retries}次后仍失败，跳过")
+        result = fetch_page(page_index, page_size)
 
         if result is None:
+            failed_pages += 1
             page_index += 1
             continue
 
         if result.get("result") == 0 or "tbody" not in result:
-            print(f"[WARN] 第 {page_index} 页无数据返回")
+            log(f"[WARN] 第 {page_index} 页无数据返回")
             page_index += 1
             continue
 
-        # 第一页时获取总页数
+        # 第一页时获取总页数 (强制转 int, 防止 API 返回字符串导致 TypeError)
         if page_index == 1:
-            total_pages = result.get("total", 1)
+            try:
+                total_pages = int(result.get("total") or 1)
+            except (TypeError, ValueError):
+                log(f"[WARN] total 字段异常: {result.get('total')!r}, 按 1 页处理")
+                total_pages = 1
             records = result.get("records", "unknown")
-            print(f"总页数: {total_pages}, 总记录数: {records}")
+            log(f"总页数: {total_pages}, 总记录数: {records}")
 
-        tbody = result["tbody"]
+        tbody = result.get("tbody") or []
         for row in tbody:
             cleaned_row = [clean_value(cell) for cell in row]
             all_data.append(cleaned_row)
 
-        print(f"第 {page_index}/{total_pages} 页: 获取 {len(tbody)} 条数据")
+        log(f"第 {page_index}/{total_pages} 页: 获取 {len(tbody)} 条数据")
         page_index += 1
 
         # 页间延迟，避免请求过快被限制
         if page_index <= total_pages:
             time.sleep(2)
 
+    if failed_pages:
+        log(f"[WARN] 共 {failed_pages} 页抓取失败")
     return all_data
 
 
@@ -210,14 +256,18 @@ def main():
     os.makedirs(data_dir, exist_ok=True)
 
     # ===== 第一步: 抓取新数据 =====
-    print(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] 开始抓取数据...")
+    log(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] 开始抓取数据...")
     scrape_time = now.strftime("%Y-%m-%d %H:%M:%S")
     new_data = fetch_all_data()
-    print(f"共抓取到 {len(new_data)} 条数据")
+    log(f"共抓取到 {len(new_data)} 条数据")
 
     if not new_data:
-        print("[ERROR] 未获取到任何数据，程序退出")
-        return
+        log("[ERROR] 未获取到任何数据。")
+        log("[HINT] 若日志中出现 '非预期的 JSON 类型' 或连接超时, 说明数据源网站"
+            "拦截了当前出口 IP (GitHub Actions runner 均为海外 Azure IP)。")
+        log("[HINT] 解决方案: 1) 用国内机器定时抓取后推送; 2) 自建国内 self-hosted runner; "
+            "3) 通过国内代理访问 API。")
+        sys.exit(1)  # 显式失败, 让 Actions 显示红色, 避免静默丢数据
 
     # 为监测时间添加年份，并追加抓取时间
     for row in new_data:
@@ -243,9 +293,9 @@ def main():
                 key = (row[2], row[3]) if len(row) > 3 else None
                 if key:
                     existing_keys.add(key)
-        print(f"已有数据: {len(existing_data)} 条")
+        log(f"已有数据: {len(existing_data)} 条")
     else:
-        print("首次抓取，创建新文件")
+        log("首次抓取，创建新文件")
 
     # ===== 第三步: 去重并合并数据 =====
     merged_data = list(existing_data)
@@ -257,7 +307,7 @@ def main():
             existing_keys.add(key)
             new_count += 1
 
-    print(f"新增数据: {new_count} 条, 合并后总计: {len(merged_data)} 条")
+    log(f"新增数据: {new_count} 条, 合并后总计: {len(merged_data)} 条")
 
     # ===== 第四步: 写入CSV文件 =====
     with open(filepath, "w", encoding="utf-8-sig", newline="") as f:
@@ -265,8 +315,8 @@ def main():
         writer.writerow(COLUMNS)
         writer.writerows(merged_data)
 
-    print(f"数据已保存到: {filepath}")
-    print("抓取完成!")
+    log(f"数据已保存到: {filepath}")
+    log("抓取完成!")
 
 
 if __name__ == "__main__":
