@@ -182,7 +182,13 @@ def fetch_all_data():
     """
     all_data = []
     page_index = 1
-    page_size = 200  # API有每页最大返回限制，PageSize过大会导致数据截断
+    # PageSize 取值依据 (2026-09-06 于 CNB 国内出口实测):
+    #   站点对每个出口 IP 的配额约为「每 60s 放行 1 次请求」, 超频即返回 -1。
+    #   PageSize=200 时需请求 9 页 -> 一轮至少 9 分钟, 中途必然撞限流,
+    #   实测每轮只能拿到 193~390 条 (全量约 1629 条)。
+    #   实测 PageSize=2000: 单次请求即返回 tbody 1529 条 (total=1 页),
+    #   请求次数 9 -> 1, 从根本上绕开限流。
+    page_size = 2000
     total_pages = 1
     failed_pages = 0
     blocked_pages = 0
