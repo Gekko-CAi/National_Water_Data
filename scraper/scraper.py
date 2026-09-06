@@ -369,6 +369,15 @@ def main():
         writer.writerows(merged_data)
 
     log(f"数据已保存到: {filepath}")
+    # 输出统计, 供 workflow 构造 commit 摘要
+    # (GITHUB_OUTPUT 是 Actions 原生机制; 本地运行时该变量不存在, 自动跳过)
+    gh_output = os.environ.get("GITHUB_OUTPUT")
+    if gh_output:
+        with open(gh_output, "a", encoding="utf-8") as f:
+            f.write(f"fetched={len(new_data)}\n")
+            f.write(f"new={new_count}\n")
+            f.write(f"total={len(merged_data)}\n")
+
     log("抓取完成!")
 
 
