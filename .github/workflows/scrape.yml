@@ -1,31 +1,27 @@
 name: Scrape Water Quality Data
 
 # 触发方式:
-#   workflow_dispatch   - GitHub Actions 页面手动执行
-#   repository_dispatch - 外部定时服务 (cron-job.org) 调用, event_type: cron_trigger
+#   1. schedule            - GitHub 内置定时 (UTC 每 2 小时第 25 分)
+#   2. repository_dispatch - 外部定时服务 (cron-job.org) 调用, event_type: scrape
+#   3. workflow_dispatch    - GitHub Actions 页面手动执行
 #
-# 观察模式说明 (2026-09-04):
-#   数据源网站 szzdjc.cnemc.cn:8070 白天对 GitHub runner 的海外 IP 完全封禁
-#   (首请求即返回 -1)。当晚 22:48 实测降级为「窗口配额限流」: 前 3 页可正常获取,
-#   第 4 页起返回 -1。因此 Actions 已恢复抓取能力, 只是每轮未必能抓全 9 页,
-#   脚本会保留已抓数据并正常提交, 缺失时次由后续周期补齐。保留 cron-job.org
-#   外部触发以持续观察该站点是否解除对 GitHub IP 的限制。
+# 北京时间触发点: 00:25, 02:25, 04:25 ... 22:25 (两条链路同一时间点, 互为备份)
 #
-#   国内出口的抓取链路 (与此互不影响):
-#     - Gitee Go 流水线 (gekko-cai/National_Water_Data, cron 每 2 小时)
-#     - 本机计划任务 local_scrape/scrape_local.py (每 2 小时)
+# 历史说明 (2026-09-06 修复):
+#   event_type 曾于 09-04 被改为 cron_trigger, 与 cron-job.org 实际发送的 "scrape"
+#   不匹配, 导致 workflow 假性停摆 —— GitHub 的 dispatch API 对无人监听的 event_type
+#   同样返回 204, cron-job.org 因此一直显示成功, 但 GitHub 侧再无任何 run。
+#   现已改回 scrape, 并恢复内置 schedule。
 on:
+  schedule:
+    - cron: '25 */2 * * *'
+
+  repository_dispatch:
+    types: [scrape]
+
   workflow_dispatch:
 
-  # cron-job.org 定时触发 (每 2 小时 POST repository_dispatch, event_type: cron_trigger)
-  repository_dispatch:
-    types: [cron_trigger]
-
-  # 若想改用 GitHub 内置 schedule (不依赖外部服务), 取消下面注释:
-  # schedule:
-  #   - cron: '0 */2 * * *'   # UTC 每偶数小时整点 = 北京时 8/10/12... 点
-
-# 防止重复抓取, 对数据源站点更友好
+# 同一时间点的两个触发只保留一个, 避免并发写文件与 git 冲突
 concurrency:
   group: scrape
   cancel-in-progress: true
@@ -33,8 +29,7 @@ concurrency:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    # 被拦截时每页会等待 60s 重试 (最多 2 次/页), 9 页最坏约 18 分钟,
-    # 加上依赖安装, 25 分钟留足余量
+    # 被拦截时每页会等待重试, 9 页最坏约 18 分钟, 加上依赖安装留足余量
     timeout-minutes: 25
     permissions:
       contents: write # 需要写权限来推送数据文件
@@ -58,9 +53,6 @@ jobs:
           TZ: Asia/Shanghai # 设置时区为北京时间
           PYTHONUNBUFFERED: '1' # 实时输出日志, job 被终止时不丢失
 
-      # 注意: 本机计划任务 (local_scrape/scrape_local.py) 也在向本仓库推送数据,
-      # 两边可能同时写。必须先 pull --rebase 再提交, 否则 push 会被远端拒绝。
-      # pull 必须放在写入数据之前(此时工作区干净), 否则 rebase 会因有未提交改动而失败。
       - name: Commit and push data
         run: |
           git config user.name "github-actions[bot]"
@@ -72,6 +64,5 @@ jobs:
           else
             COMMIT_MSG="Auto-scrape: $(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M') Beijing time"
             git commit -m "$COMMIT_MSG"
-            # 首次推送若被拒(远端又有新提交), 再同步一次后重试
             git push || { git pull --rebase origin "${GITHUB_REF_NAME}" && git push; }
           fi
