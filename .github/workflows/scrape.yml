@@ -48,6 +48,7 @@ jobs:
           pip install -r scraper/requirements.txt
 
       - name: Run scraper
+        id: scrape
         run: python -u scraper/scraper.py
         env:
           TZ: Asia/Shanghai # 设置时区为北京时间
@@ -62,7 +63,16 @@ jobs:
           if git diff --staged --quiet; then
             echo "No new data to commit"
           else
-            COMMIT_MSG="Auto-scrape: $(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M') Beijing time"
+            TS="$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M')"
+            FETCHED="${{ steps.scrape.outputs.fetched }}"
+            NEW="${{ steps.scrape.outputs.new }}"
+            TOTAL="${{ steps.scrape.outputs.total }}"
+            if [ -n "$FETCHED" ]; then
+              COMMIT_MSG="data: 水质数据 $TS 抓取 $FETCHED 条, 新增 $NEW 条, 合计 $TOTAL 条"
+            else
+              # 统计缺失时回退, 保证提交不中断
+              COMMIT_MSG="Auto-scrape: $TS Beijing time"
+            fi
             git commit -m "$COMMIT_MSG"
             git push || { git pull --rebase origin "${GITHUB_REF_NAME}" && git push; }
           fi
